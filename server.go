@@ -1,18 +1,17 @@
 package main
 
+//一个示例服务端读取消息
 import (
 	"bytes"
 	"fmt"
+	log "github.com/sirupsen/logrus"
 	"io"
 	"matrix/util"
 	"net"
 )
-import (
-	log "github.com/sirupsen/logrus"
-)
 
 func main() {
-	listener, err := net.Listen("tcp", "127.0.0.1:12346")
+	listener, err := net.Listen("tcp", util.ConfigInfo.Socket.Raddr)
 	if err != nil {
 		log.Fatalf("listen error: %s", err.Error())
 	}
