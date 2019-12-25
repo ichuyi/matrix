@@ -10,8 +10,8 @@
     "database": "course"
   },
   "matrix": {
-    "length": 4,
-    "width": 2
+    "length": 16,
+    "width": 16
   },
   "socket": {
     "raddr": "127.0.0.1:12346",
