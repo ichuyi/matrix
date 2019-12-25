@@ -3,10 +3,10 @@
     "port": "12345"
   },
   "mysql": {
-    "host": "120.55.115.201",
-    "port": "3600",
+    "host": "127.0.0.1",
+    "port": "3306",
     "user": "root",
-    "password": "191400",
+    "password": "root",
     "database": "course"
   },
   "matrix": {
