@@ -6,3 +6,4 @@
 git clone https://github.com/mhiwy/matrix.git
 sh start.sh
 ```
+要停止该服务请执行``kill -2 pid``

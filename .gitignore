@@ -2,3 +2,5 @@ matrix
 .idea
 server
 test.go
+output.log
+server.log
