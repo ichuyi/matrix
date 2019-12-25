@@ -22,16 +22,23 @@ type MatrixConfig struct {
 	Length int `json:"length"`
 	Width  int `json:"width"`
 }
+type SocketConfig struct {
+	Raddr      string `json:"raddr"`
+	Delimiter  string `json:"delimiter"`
+	MaxMessage int    `json:"max_message"`
+}
 type Config struct {
 	MySQL   MySQLConfig   `json:"mysql"`
 	Service ServiceConfig `json:"service"`
 	Matrix  MatrixConfig  `json:"matrix"`
+	Socket  SocketConfig  `json:"socket"`
 }
 
 var (
 	execBasePath = getCurrentDirectory()
-	configPath   = execBasePath + "/config.json"
-	ConfigInfo   Config
+	//execBasePath="/Users/mhiwy/Documents/matrix"
+	configPath = execBasePath + "/config.json"
+	ConfigInfo Config
 )
 
 func init() {

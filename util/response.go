@@ -9,7 +9,7 @@ type CommonResponse struct {
 func OKResponse(data interface{}) *CommonResponse {
 	return &CommonResponse{
 		Code:    0,
-		Message: "",
+		Message: "ok",
 		Result:  data,
 	}
 }

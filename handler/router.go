@@ -7,11 +7,10 @@ import (
 
 func InitRouter() *gin.Engine {
 	r := gin.Default()
-	gin.SetMode(gin.ReleaseMode)
+	//gin.SetMode(gin.ReleaseMode)
 	v1 := r.Group("/matrix")
 	{
-		v1.POST("/add", addMatrix)
-		v1.GET("/get", getMatrix)
+		v1.POST("/resource", resource)
 	}
 	return r
 }

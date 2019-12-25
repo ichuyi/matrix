@@ -10,7 +10,12 @@
     "database": "course"
   },
   "matrix": {
-    "length": 16,
-    "width": 16
+    "length": 4,
+    "width": 2
+  },
+  "socket": {
+    "raddr": "127.0.0.1:12346",
+    "delimiter": ",",
+    "max_message": 10000
   }
 }
