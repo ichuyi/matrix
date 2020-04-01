@@ -1,6 +1,5 @@
 package main
 
-//一个示例服务端读取消息
 import (
 	"bytes"
 	"fmt"
@@ -11,21 +10,18 @@ import (
 )
 
 func main() {
-	listener, err := net.Listen("tcp", util.ConfigInfo.Socket.Raddr)
+	conn, err := net.Dial("tcp", util.ConfigInfo.Socket.Laddr)
 	if err != nil {
-		log.Fatalf("listen error: %s", err.Error())
+		log.Fatalf("socket connect err: %s", err.Error())
 	}
-	defer listener.Close()
 	for {
-		conn, err := listener.Accept()
+		_, err = write(conn, util.ConfigInfo.Socket.Confirm)
 		if err != nil {
-			log.Fatalf("accept error: %s", err.Error())
+			log.Errorf("socket send message: %s,error: %s", util.ConfigInfo.Socket.Confirm, err.Error())
+			break
+		} else {
+			//	log.Info("socket send message success")
 		}
-		go handleConn(conn)
-	}
-}
-func handleConn(conn net.Conn) {
-	for {
 		str, err := read(conn)
 		if err != nil {
 			if err == io.EOF {
@@ -35,10 +31,17 @@ func handleConn(conn net.Conn) {
 			}
 			break
 		}
-		fmt.Println(str)
+		if str != "" {
+			fmt.Println(str)
+		}
 	}
+	conn.Close()
 }
-
+func write(conn net.Conn, s string) (int, error) {
+	var buffer bytes.Buffer
+	buffer.WriteString(s + util.ConfigInfo.Socket.Delimiter)
+	return conn.Write(buffer.Bytes())
+}
 func read(conn net.Conn) (string, error) {
 	readByte := make([]byte, 1)
 	var buffer bytes.Buffer

@@ -54,7 +54,6 @@ func GetMatrix(id int64, command int) (matrix *model.Matrix, err error) {
 	}
 	if err != nil {
 		log.Errorf("get matrix err: %s", err.Error())
-		return
 	}
 	return
 }

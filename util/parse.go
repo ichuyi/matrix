@@ -23,9 +23,10 @@ type MatrixConfig struct {
 	Width  int `json:"width"`
 }
 type SocketConfig struct {
-	Raddr      string `json:"raddr"`
+	Laddr      string `json:"laddr"`
 	Delimiter  string `json:"delimiter"`
 	MaxMessage int    `json:"max_message"`
+	Confirm    string `json:"confirm"`
 }
 type Config struct {
 	MySQL   MySQLConfig   `json:"mysql"`
@@ -36,7 +37,7 @@ type Config struct {
 
 var (
 	execBasePath = getCurrentDirectory()
-	//execBasePath="/Users/mhiwy/Documents/matrix"
+	//execBasePath = "/Users/mhiwy/Documents/matrix"
 	configPath = execBasePath + "/config.json"
 	ConfigInfo Config
 )
