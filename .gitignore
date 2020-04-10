@@ -6,3 +6,7 @@ output.log
 server.log
 matrix.exe
 .DS_Store
+client.log
+matrix.log
+MySQL.log
+client.exe

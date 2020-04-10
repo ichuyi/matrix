@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	log "github.com/sirupsen/logrus"
+	"matrix/dao"
 	"matrix/handler"
 	"matrix/util"
 	"net/http"
@@ -26,6 +27,12 @@ func init() {
 	} else {
 		log.SetLevel(log.InfoLevel)
 	}
+	f,err:=os.Create("matrix.log")
+	if err!=nil{
+		panic("创建日志文件失败")
+	}
+	log.SetOutput(f)
+	dao.InitDB()
 }
 func main() {
 	r := handler.InitRouter()

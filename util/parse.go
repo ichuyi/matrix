@@ -37,9 +37,9 @@ type Config struct {
 }
 
 var (
-	execBasePath = getCurrentDirectory()
+	//execBasePath = getCurrentDirectory()
 	//execBasePath = "/Users/mhiwy/Documents/matrix"
-	configPath   = execBasePath + "/config.json"
+	configPath   = "config.json"
 	ConfigInfo   Config
 )
 

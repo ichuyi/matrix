@@ -1,7 +1,7 @@
 {
   "service": {
     "port": "12345",
-    "log_level": 4
+    "log_level": 2
   },
   "mysql": {
     "host": "120.55.115.201",

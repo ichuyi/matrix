@@ -6,8 +6,8 @@ import (
 )
 
 func InitRouter() *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
-	//gin.SetMode(gin.ReleaseMode)
 	v1 := r.Group("/matrix")
 	{
 		v1.POST("/resource", resource)

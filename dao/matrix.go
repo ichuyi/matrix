@@ -7,18 +7,24 @@ import (
 	log "github.com/sirupsen/logrus"
 	"matrix/model"
 	"matrix/util"
+	"os"
 	"xorm.io/core"
 )
 
 var matrixEngine *xorm.Engine
 
-func init() {
+func InitDB() {
 	connect := fmt.Sprintf("%s:%s@(%s:%s)/%s?charset=utf8", util.ConfigInfo.MySQL.User, util.ConfigInfo.MySQL.Password, util.ConfigInfo.MySQL.Host, util.ConfigInfo.MySQL.Port, util.ConfigInfo.MySQL.Database)
 	var err error
 	matrixEngine, err = xorm.NewEngine("mysql", connect)
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
+	f,err:=os.Create("MySQL.log")
+	if err!=nil{
+		panic("创建MySQL操作日志文件失败")
+	}
+	matrixEngine.SetLogger(xorm.NewSimpleLogger(f))
 	matrixEngine.ShowSQL(true)
 	matrixEngine.Logger().SetLevel(core.LOG_DEBUG)
 	err = matrixEngine.Ping()

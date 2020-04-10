@@ -2,13 +2,27 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	"io"
 	"matrix/util"
 	"net"
+	"os"
 )
 
+func init() {
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors: false,
+		FullTimestamp: true,
+	})
+	log.SetReportCaller(true)
+	log.SetOutput(os.Stdout)
+	log.SetLevel(log.InfoLevel)
+	f, err := os.Create("client.log")
+	if err != nil {
+		panic("创建日志文件失败")
+	}
+	log.SetOutput(f)
+}
 func main() {
 	for i := 0; i < 5; i++ {
 		go func() {
@@ -34,7 +48,7 @@ func main() {
 					break
 				}
 				if str != "" {
-					fmt.Println(str)
+					log.Infof("receive:%s",str)
 				}
 			}
 			conn.Close()
