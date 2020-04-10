@@ -16,7 +16,8 @@ type MySQLConfig struct {
 	Database string `json:"database"`
 }
 type ServiceConfig struct {
-	Port string `json:"port"`
+	Port     string `json:"port"`
+	LogLevel int    `json:"log_level"`
 }
 type MatrixConfig struct {
 	Length int `json:"length"`
@@ -26,7 +27,7 @@ type SocketConfig struct {
 	Laddr      string `json:"laddr"`
 	Delimiter  string `json:"delimiter"`
 	MaxMessage int    `json:"max_message"`
-	Confirm    string `json:"confirm"`
+	//	Confirm    string `json:"confirm"`
 }
 type Config struct {
 	MySQL   MySQLConfig   `json:"mysql"`
@@ -38,8 +39,8 @@ type Config struct {
 var (
 	execBasePath = getCurrentDirectory()
 	//execBasePath = "/Users/mhiwy/Documents/matrix"
-	configPath = execBasePath + "/config.json"
-	ConfigInfo Config
+	configPath   = execBasePath + "/config.json"
+	ConfigInfo   Config
 )
 
 func init() {

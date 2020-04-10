@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+var level = []log.Level{log.TraceLevel, log.DebugLevel, log.InfoLevel, log.WarnLevel, log.ErrorLevel, log.FatalLevel, log.PanicLevel}
+
 func init() {
 	log.SetFormatter(&log.TextFormatter{
 		DisableColors: false,
@@ -19,7 +21,11 @@ func init() {
 	})
 	log.SetReportCaller(true)
 	log.SetOutput(os.Stdout)
-	log.SetLevel(log.InfoLevel)
+	if util.ConfigInfo.Service.LogLevel < len(level) && util.ConfigInfo.Service.LogLevel >= 0 {
+		log.SetLevel(level[util.ConfigInfo.Service.LogLevel])
+	} else {
+		log.SetLevel(log.InfoLevel)
+	}
 }
 func main() {
 	r := handler.InitRouter()
@@ -43,7 +49,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
-		fmt.Printf("Server Shutdown:", err)
+		fmt.Printf("Server Shutdown: %s", err)
 		os.Exit(1)
 	}
 	fmt.Println("Server exiting")

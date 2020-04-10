@@ -8,9 +8,11 @@ import (
 	"matrix/socket"
 	"matrix/util"
 	"net/http"
+	"sync"
 )
 
 var current int64 = 0
+var lock = new(sync.Mutex)
 
 type Req struct {
 	Res string `json:"res"`
@@ -29,7 +31,9 @@ func resource(ctx *gin.Context) {
 			ctx.JSON(http.StatusOK, util.FailedResponse(GetMatrix, GetMatrixMsg))
 			return
 		}
+		lock.Lock()
 		current = m.Id
+		lock.Unlock()
 		ctx.JSON(http.StatusOK, util.OKResponse(m.MatrixInfo))
 		go func() {
 			socket.Message <- m.MatrixInfo
@@ -40,12 +44,14 @@ func resource(ctx *gin.Context) {
 			ctx.JSON(http.StatusOK, util.FailedResponse(GetMatrix, GetMatrixMsg))
 			return
 		}
+		lock.Lock()
 		current = m.Id
+		lock.Unlock()
 		ctx.JSON(http.StatusOK, util.OKResponse(m.MatrixInfo))
 		go func() {
 			socket.Message <- m.MatrixInfo
 		}()
-	} else if util.CheckArr(r.Res) {
+	} else if ok, _ := util.CheckArr(r.Res); ok {
 		m := &model.Matrix{
 			MatrixInfo: r.Res,
 		}
@@ -54,7 +60,9 @@ func resource(ctx *gin.Context) {
 			ctx.JSON(http.StatusOK, util.FailedResponse(AddMatrix, AddMatrixMsg))
 			return
 		}
+		lock.Lock()
 		current = m.Id
+		lock.Unlock()
 		ctx.JSON(http.StatusOK, util.OKResponse(r.Res))
 		go func() {
 			socket.Message <- r.Res
