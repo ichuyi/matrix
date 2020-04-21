@@ -14,7 +14,7 @@ func CheckArr(input string) (bool, string) {
 	}
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		cols := strings.Split(line, " ")
+		cols := strings.Split(line, "")
 		if len(cols) != ConfigInfo.Matrix.Length {
 			return false, ""
 		}

@@ -27,8 +27,8 @@ func init() {
 	} else {
 		log.SetLevel(log.InfoLevel)
 	}
-	f,err:=os.Create("matrix.log")
-	if err!=nil{
+	f, err := os.Create("matrix.log")
+	if err != nil {
 		panic("创建日志文件失败")
 	}
 	log.SetOutput(f)

@@ -11,8 +11,8 @@
     "database": "course"
   },
   "matrix": {
-    "length": 16,
-    "width": 16
+    "length": 30,
+    "width": 20
   },
   "socket": {
     "laddr": "127.0.0.1:12346",
