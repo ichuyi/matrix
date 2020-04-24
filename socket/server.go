@@ -13,7 +13,7 @@ import (
 var Message chan string
 var client []net.Conn
 var lock = new(sync.Mutex)
-var duration = time.Duration(util.ConfigInfo.Socket.Duration) * time.Microsecond
+var duration = time.Duration(util.ConfigInfo.Socket.Duration) * time.Millisecond
 var timer = time.NewTimer(duration)
 
 func init() {
