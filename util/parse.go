@@ -27,6 +27,7 @@ type SocketConfig struct {
 	Laddr      string `json:"laddr"`
 	Delimiter  string `json:"delimiter"`
 	MaxMessage int    `json:"max_message"`
+	Duration   int    `json:"duration"`
 	//	Confirm    string `json:"confirm"`
 }
 type Config struct {
@@ -39,8 +40,8 @@ type Config struct {
 var (
 	//execBasePath = getCurrentDirectory()
 	//execBasePath = "/Users/mhiwy/Documents/matrix"
-	configPath   = "config.json"
-	ConfigInfo   Config
+	configPath = "config.json"
+	ConfigInfo Config
 )
 
 func init() {

@@ -13,6 +13,8 @@ import (
 var Message chan string
 var client []net.Conn
 var lock = new(sync.Mutex)
+var duration = time.Duration(util.ConfigInfo.Socket.Duration) * time.Microsecond
+var timer = time.NewTimer(duration)
 
 func init() {
 	Message = make(chan string, util.ConfigInfo.Socket.MaxMessage)
@@ -37,29 +39,25 @@ func init() {
 		}
 	}()
 	go func() {
-		defer close(Message)
-		for {
-			select {
-			case m := <-Message:
-				if ok, message := util.CheckArr(m); ok {
-					for i := 0; i < len(client); {
-						_, err := write(client[i], message+util.ConfigInfo.Socket.Delimiter)
-						if err != nil {
-							log.Errorf("socket send message failed,error: %s", err.Error())
-							log.Infof("close connection between :%s", client[i].RemoteAddr())
-							_ = client[i].Close()
-							lock.Lock()
-							client = append(client[0:i], client[i+1:]...)
-							lock.Unlock()
-							log.Infof("current there have %d connections", len(client))
-						} else {
-							log.Infof("socket send message successfully to: %s", client[i].RemoteAddr())
-							i++
-						}
+		for m := range Message {
+			if ok, message := util.CheckArr(m); ok {
+				<-timer.C
+				timer.Reset(duration)
+				for i := 0; i < len(client); {
+					_, err := write(client[i], message+util.ConfigInfo.Socket.Delimiter)
+					if err != nil {
+						log.Errorf("socket send message failed,error: %s", err.Error())
+						log.Infof("close connection between :%s", client[i].RemoteAddr())
+						_ = client[i].Close()
+						lock.Lock()
+						client = append(client[0:i], client[i+1:]...)
+						lock.Unlock()
+						log.Infof("current there have %d connections", len(client))
+					} else {
+						log.Infof("socket send message successfully to: %s", client[i].RemoteAddr())
+						i++
 					}
 				}
-			default:
-				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}()

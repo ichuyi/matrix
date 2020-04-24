@@ -6,6 +6,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"matrix/dao"
 	"matrix/handler"
+	"matrix/socket"
 	"matrix/util"
 	"net/http"
 	"os"
@@ -35,6 +36,7 @@ func init() {
 	dao.InitDB()
 }
 func main() {
+	defer close(socket.Message)
 	r := handler.InitRouter()
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", util.ConfigInfo.Service.Port),

@@ -17,6 +17,7 @@
   "socket": {
     "laddr": "127.0.0.1:12346",
     "delimiter": " ",
-    "max_message": 10000
+    "max_message": 10000,
+    "duration": 5000
   }
 }
