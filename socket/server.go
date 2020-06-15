@@ -10,57 +10,72 @@ import (
 	"time"
 )
 
-var Message chan string
-var client []net.Conn
-var lock = new(sync.Mutex)
-var duration = time.Duration(util.ConfigInfo.Socket.Duration) * time.Millisecond
-var timer = time.NewTimer(duration)
+type doFunc func(string) (bool, string)
+type TcpServer struct {
+	Message  chan string
+	client   []net.Conn
+	lock     *sync.Mutex
+	duration time.Duration
+	timer    *time.Timer
+	doFunc   doFunc
+}
 
-func init() {
-	Message = make(chan string, util.ConfigInfo.Socket.MaxMessage)
-	client = make([]net.Conn, 0)
+func NewServer(addr string, duration int, do doFunc) *TcpServer {
+	server := new(TcpServer)
+	server.Message = make(chan string, util.ConfigInfo.Socket.MaxMessage)
+	server.client = make([]net.Conn, 0)
+	server.lock = new(sync.Mutex)
+	server.doFunc = do
+	if duration > 0 {
+		server.duration = time.Duration(duration) * time.Millisecond
+		server.timer = time.NewTimer(server.duration)
+	}
 	go func() {
-		listener, err := net.Listen("tcp", util.ConfigInfo.Socket.Laddr)
+		defer close(server.Message)
+		listener, err := net.Listen("tcp", addr)
 		if err != nil {
-			log.Fatalf("listen error: %s", err.Error())
+			log.Fatalf("%s listen error: %s", addr, err.Error())
 		}
 		defer listener.Close()
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				log.Fatalf("accept error: %s", err.Error())
+				log.Fatalf("%s accept error: %s", addr, err.Error())
 			} else {
-				lock.Lock()
-				client = append(client, conn)
-				lock.Unlock()
-				log.Infof("success connect to %s", conn.RemoteAddr())
-				log.Infof("there have %d connections", len(client))
+				server.lock.Lock()
+				server.client = append(server.client, conn)
+				server.lock.Unlock()
+				log.Infof("%s success connect to %s", addr, conn.RemoteAddr())
+				log.Infof("%s there have %d connections", addr, len(server.client))
 			}
 		}
 	}()
 	go func() {
-		for m := range Message {
-			if ok, message := util.CheckArr(m); ok {
-				<-timer.C
-				timer.Reset(duration)
-				for i := 0; i < len(client); {
-					_, err := write(client[i], message+util.ConfigInfo.Socket.Delimiter)
+		for m := range server.Message {
+			if ok, message := server.doFunc(m); ok {
+				if server.timer != nil {
+					<-server.timer.C
+					server.timer.Reset(server.duration)
+				}
+				for i := 0; i < len(server.client); {
+					_, err := write(server.client[i], message+util.ConfigInfo.Socket.Delimiter)
 					if err != nil {
-						log.Errorf("socket send message failed,error: %s", err.Error())
-						log.Infof("close connection between :%s", client[i].RemoteAddr())
-						_ = client[i].Close()
-						lock.Lock()
-						client = append(client[0:i], client[i+1:]...)
-						lock.Unlock()
-						log.Infof("current there have %d connections", len(client))
+						log.Errorf("%s socket send message failed,error: %s", addr, err.Error())
+						log.Infof("%s close connection between :%s", addr, server.client[i].RemoteAddr())
+						_ = server.client[i].Close()
+						server.lock.Lock()
+						server.client = append(server.client[0:i], server.client[i+1:]...)
+						server.lock.Unlock()
+						log.Infof("%s current there have %d connections", addr, len(server.client))
 					} else {
-						log.Infof("socket send message successfully to: %s", client[i].RemoteAddr())
+						log.Infof("%s socket send message successfully to: %s", addr, server.client[i].RemoteAddr())
 						i++
 					}
 				}
 			}
 		}
 	}()
+	return server
 }
 
 //func handleConn(conn net.Conn) {

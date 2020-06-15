@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"io"
-	"matrix/util"
 	"net"
 	"os"
+	"time"
 )
 
 func init() {
@@ -24,12 +25,19 @@ func init() {
 	log.SetOutput(f)
 }
 func main() {
-	for i := 0; i < 5; i++ {
-		go func() {
-			conn, err := net.Dial("tcp", util.ConfigInfo.Socket.Laddr)
-			if err != nil {
-				log.Fatalf("socket connect err: %s", err.Error())
+	for i := 0; i < 600; i++ {
+		go func(i int) {
+			var conn net.Conn
+			var err error
+			for {
+				conn, err = net.Dial("tcp", "127.0.0.1:5577")
+				if err != nil {
+					//log.Errorf("socket connect err: %s", err.Error())
+				} else {
+					break
+				}
 			}
+			//	defer conn.Close()
 			for {
 				//_, err = write(conn, util.ConfigInfo.Socket.Confirm)
 				//if err != nil {
@@ -48,17 +56,74 @@ func main() {
 					break
 				}
 				if str != "" {
-					log.Infof("receive:%s",str)
+					log.Infof("receive:%s", str)
 				}
+				if str == "sid" {
+					_, _ = write(conn, fmt.Sprintf("<%d>\r", i+1))
+				} else {
+					time.Sleep(300 * time.Millisecond)
+					//_, _ = write(conn, "<OK>\r")
+				}
+				if i > 490 && i < 501 {
+					conn.Close()
+				}
+
 			}
-			conn.Close()
-		}()
+		}(i)
 	}
+	time.Sleep(10 * time.Second)
+	go func() {
+		var conn net.Conn
+		var err error
+		for {
+			conn, err = net.Dial("tcp", "127.0.0.1:5577")
+			if err != nil {
+				//log.Errorf("socket connect err: %s", err.Error())
+			} else {
+				break
+			}
+		}
+
+		//	defer conn.Close()
+		go func() {
+			for {
+				write(conn, "1,mr")
+				time.Sleep(5 * time.Second)
+			}
+		}()
+		for {
+			//_, err = write(conn, util.ConfigInfo.Socket.Confirm)
+			//if err != nil {
+			//	log.Errorf("socket send message: %s,error: %s", util.ConfigInfo.Socket.Confirm, err.Error())
+			//	break
+			//} else {
+			//	//	log.Info("socket send message success")
+			//}
+			str, err := read(conn)
+			if err != nil {
+				if err == io.EOF {
+					log.Info("conn close")
+				} else {
+					log.Error("read error: %s", err.Error())
+				}
+				break
+			}
+			if str != "" {
+				log.Infof("receive:%s", str)
+			}
+			if str == "sid" {
+				_, _ = write(conn, fmt.Sprintf("<%d>", 0))
+			} else {
+				time.Sleep(300 * time.Millisecond)
+				//	_, _ = write(conn, "<OK>")
+			}
+		}
+	}()
 	select {}
 }
 func write(conn net.Conn, s string) (int, error) {
 	var buffer bytes.Buffer
-	buffer.WriteString(s + util.ConfigInfo.Socket.Delimiter)
+	buffer.WriteString(s + "\n")
 	return conn.Write(buffer.Bytes())
 }
 func read(conn net.Conn) (string, error) {
@@ -69,7 +134,7 @@ func read(conn net.Conn) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if string(readByte) == util.ConfigInfo.Socket.Delimiter {
+		if string(readByte) == "\n" {
 			break
 		}
 		buffer.Write(readByte)

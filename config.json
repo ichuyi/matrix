@@ -15,7 +15,8 @@
     "width": 20
   },
   "socket": {
-    "laddr": "127.0.0.1:12346",
+    "unity_laddr": "0.0.0.0:12346",
+    "forward_laddr": "0.0.0.0:12347",
     "delimiter": " ",
     "max_message": 10000,
     "duration": 5000

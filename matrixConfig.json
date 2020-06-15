@@ -1,0 +1,7 @@
+{
+  "addr": "0.0.0.0:5577",
+  "max_command": 20,
+  "duration": 400,
+  "max_send_times": 2,
+  "report_duration": 5
+}
