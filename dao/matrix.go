@@ -20,8 +20,8 @@ func InitDB() {
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
-	f,err:=os.Create("MySQL.log")
-	if err!=nil{
+	f, err := os.Create("MySQL.log")
+	if err != nil {
 		panic("创建MySQL操作日志文件失败")
 	}
 	matrixEngine.SetLogger(xorm.NewSimpleLogger(f))

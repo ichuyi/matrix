@@ -1,7 +1,10 @@
 {
-  "addr": "0.0.0.0:5577",
+  "local_addr": "0.0.0.0:5588",
   "max_command": 20,
   "duration": 400,
   "max_send_times": 2,
-  "report_duration": 5
+  "report_duration": 5,
+  "motor_addr_list": [
+    "127.0.0.1:8888"
+  ]
 }

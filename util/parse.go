@@ -24,10 +24,11 @@ type MatrixConfig struct {
 	Width  int `json:"width"`
 }
 type SocketConfig struct {
-	Laddr      string `json:"laddr"`
-	Delimiter  string `json:"delimiter"`
-	MaxMessage int    `json:"max_message"`
-	Duration   int    `json:"duration"`
+	UnityLaddr   string `json:"unity_laddr"`
+	ForwardLaddr string `json:"forward_laddr"`
+	Delimiter    string `json:"delimiter"`
+	MaxMessage   int    `json:"max_message"`
+	Duration     int    `json:"duration"`
 	//	Confirm    string `json:"confirm"`
 }
 type Config struct {

@@ -11,20 +11,19 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type ServerConfig struct {
-	Addr           string `json:"addr"`
+	LocalAddr      string `json:"local_addr"`
 	MaxCommand     int    `json:"max_command"`
 	Duration       int64  `json:"duration"`
 	MaxSendTimes   int    `json:"max_send_times"`
 	ReportDuration int    `json:"report_duration"`
+	MotorAddrList []string `json:"motor_addr_list"`
 }
 
 var configPath = "matrixConfig.json"
@@ -39,24 +38,26 @@ type Command struct {
 	id      string
 	content string
 }
-type MotorServer struct {
-	command       map[string]chan *Command
-	commandLock   *sync.RWMutex
-	numberOfMotor int64
-	connections   int64
-	ctx           context.Context
-	cancel        context.CancelFunc
+type MotorClient struct {
+	command        map[string]chan *Command
+	commandLock    *sync.RWMutex
+	ctx            context.Context
+	cancel         context.CancelFunc
+	connectedMotor map[string]struct{}
+	motorLock      *sync.RWMutex
 }
 
-func NewMotorServer() *MotorServer {
-	m := new(MotorServer)
+func NewMotorClient() *MotorClient {
+	m := new(MotorClient)
 	m.command = make(map[string]chan *Command, ConfigInfo.MaxCommand)
 	m.commandLock = new(sync.RWMutex)
+	m.connectedMotor = make(map[string]struct{})
+	m.motorLock = new(sync.RWMutex)
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	return m
 }
 
-var motorServer *MotorServer
+var motorClient *MotorClient
 
 func parse() {
 	conf, err := os.Open(configPath)
@@ -85,7 +86,7 @@ func initLog() {
 func init() {
 	parse()
 	initLog()
-	motorServer = NewMotorServer()
+	motorClient = NewMotorClient()
 }
 func main() {
 	defer func() {
@@ -94,30 +95,42 @@ func main() {
 		}
 	}()
 	quit = make(chan os.Signal)
-	listener, err := net.Listen("tcp", ConfigInfo.Addr)
+	listener, err := net.Listen("tcp", ConfigInfo.LocalAddr)
 	if err != nil {
-		log.Fatalf("%s listen error: %s", ConfigInfo.Addr, err.Error())
+		log.Fatalf("%s listen error: %s", ConfigInfo.LocalAddr, err.Error())
 	}
-	log.Infof("start to listen, addr is: %s", ConfigInfo.Addr)
+	log.Infof("start to listen, addr is: %s", ConfigInfo.LocalAddr)
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				log.Errorf("%s accept error: %s", ConfigInfo.Addr, err.Error())
+				log.Errorf("%s accept error: %s", ConfigInfo.LocalAddr, err.Error())
 				return
 			} else {
-				atomic.AddInt64(&motorServer.connections, 1)
-				log.Debugf("%d connections", motorServer.connections)
-				go handlerConn(conn)
+				go handlerUnity(conn)
 			}
+		}
+	}()
+	go func() {
+		for id := range ConfigInfo.MotorAddrList {
+			number := strconv.Itoa(id + 1)
+			conn := connectMotor(number, ConfigInfo.MotorAddrList[id])
+			r := &MotorResult{}
+			r.lock = new(sync.RWMutex)
+			command := make(chan *Command, ConfigInfo.MaxCommand)
+			motorClient.commandLock.Lock()
+			motorClient.command[number] = command
+			motorClient.commandLock.Unlock()
+			go handleMotor(conn, number, r, command)
+			time.Sleep(50 * time.Millisecond)
 		}
 	}()
 	signal.Notify(quit)
 	select {
 	case <-quit:
-	case <-motorServer.ctx.Done():
+	case <-motorClient.ctx.Done():
 	}
-	motorServer.cancel()
+	motorClient.cancel()
 	log.Println("start closing server...")
 	if listener != nil {
 		listener.Close()
@@ -125,109 +138,22 @@ func main() {
 	time.Sleep(5 * time.Second)
 	log.Println("closed server")
 }
-func handlerConn(conn net.Conn) {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Errorf("panic error: %v", err)
+func connectMotor(number string, addr string) net.Conn {
+	var conn net.Conn
+	var err error
+	for {
+		conn, err = net.Dial("tcp", addr)
+		if err == nil {
+			break
+		} else {
+			log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
 		}
-	}()
-	ctx, cancel := context.WithCancel(motorServer.ctx)
-	defer cancel()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				_, err := writeData(conn, "sid")
-				if err != nil {
-					log.Errorf("connection is closed,error: %s,remote addr: %s", err.Error(), conn.RemoteAddr())
-					conn.Close()
-					atomic.AddInt64(&motorServer.connections, -1)
-					return
-				}
-				time.Sleep(10 * time.Second)
-			}
-		}
-	}()
-
-	r := bufio.NewReader(conn)
-	go func() {
-		for {
-			recs, err := readData(r)
-			if err != nil {
-				log.Errorf("connection is closed,error: %s,remote addr: %s", err.Error(), conn.RemoteAddr())
-				conn.Close()
-				atomic.AddInt64(&motorServer.connections, -1)
-				return
-			}
-			log.Infof("receive %s from %s", recs, conn.RemoteAddr())
-			r, err := regexp.Compile("<[0-9]+>")
-			if err != nil {
-				log.Errorf("regex compile error: %s", err.Error())
-				conn.Close()
-				atomic.AddInt64(&motorServer.connections, -1)
-				return
-			}
-			data := r.FindString(recs)
-			if data != "" {
-				s := data[1 : len(data)-1]
-				if id, err := strconv.Atoi(s); err != nil {
-					log.Errorf("response to sid error: %s,response is %s", err.Error(), s)
-					continue
-				} else {
-					cancel()
-					if id > 0 {
-						atomic.AddInt64(&motorServer.numberOfMotor, 1)
-						log.Debugf("motor %s has connected, there have %d connected motors", s, motorServer.numberOfMotor)
-						r := new(MotorResult)
-						r.lock = new(sync.RWMutex)
-						c := make(chan *Command, ConfigInfo.MaxCommand)
-						motorServer.commandLock.Lock()
-						motorServer.command[s] = c
-						motorServer.commandLock.Unlock()
-						go handleMotor(conn, s, r, c)
-					} else {
-						go handlerUnity(conn)
-					}
-					return
-				}
-			} else if strings.Contains(recs, "<admin>") {
-				cancel()
-				go handlerAdmin(conn)
-				return
-			}
-		}
-	}()
-	<-motorServer.ctx.Done()
-}
-func handlerAdmin(conn net.Conn) {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Errorf("panic error: %v", err)
-		}
-	}()
-	defer func() {
-		conn.Close()
-		atomic.AddInt64(&motorServer.connections, -1)
-	}()
-	r := bufio.NewReader(conn)
-	ctx, cancel := context.WithCancel(motorServer.ctx)
-	defer cancel()
-	go func() {
-		for {
-			data, err := readData(r)
-			if err != nil {
-				log.Errorf("read data error: %s", err.Error())
-				cancel()
-				return
-			} else if strings.Contains(data, "quit") {
-				motorServer.cancel()
-			}
-
-		}
-	}()
-	<-ctx.Done()
+		time.Sleep(5 * time.Second)
+	}
+	motorClient.motorLock.Lock()
+	motorClient.connectedMotor[number] = struct{}{}
+	motorClient.motorLock.Unlock()
+	return conn
 }
 func handlerUnity(conn net.Conn) {
 	defer func() {
@@ -237,9 +163,8 @@ func handlerUnity(conn net.Conn) {
 	}()
 	defer func() {
 		conn.Close()
-		atomic.AddInt64(&motorServer.connections, -1)
 	}()
-	ctx, cancel := context.WithCancel(motorServer.ctx)
+	ctx, cancel := context.WithCancel(motorClient.ctx)
 	defer cancel()
 	r := bufio.NewReader(conn)
 	go func() {
@@ -248,6 +173,9 @@ func handlerUnity(conn net.Conn) {
 			if err != nil {
 				log.Errorf("read data error: %s", err.Error())
 				cancel()
+				return
+			} else if strings.Contains(data, "quit") {
+				motorClient.cancel()
 				return
 			} else {
 				cmd := strings.Split(data, ",")
@@ -259,9 +187,9 @@ func handlerUnity(conn net.Conn) {
 						id:      cmd[0],
 						content: cmd[1],
 					}
-					motorServer.commandLock.RLock()
-					c, ok := motorServer.command[m.id]
-					motorServer.commandLock.RUnlock()
+					motorClient.commandLock.RLock()
+					c, ok := motorClient.command[m.id]
+					motorClient.commandLock.RUnlock()
 					if ok {
 						select {
 						case c <- &m:
@@ -284,12 +212,12 @@ func handlerUnity(conn net.Conn) {
 				ticker.Stop()
 				return
 			case <-ticker.C:
-				motorServer.commandLock.RLock()
-				motor := make([]string, 0, len(motorServer.command))
-				for k := range motorServer.command {
+				motorClient.motorLock.RLock()
+				motor := make([]string, 0, len(motorClient.connectedMotor))
+				for k := range motorClient.connectedMotor {
 					motor = append(motor, k)
 				}
-				motorServer.commandLock.RUnlock()
+				motorClient.motorLock.RUnlock()
 				writeData(conn, strings.Join(motor, ","))
 			}
 		}
@@ -305,21 +233,27 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 	}()
 	defer func() {
 		c.Close()
-		atomic.AddInt64(&motorServer.connections, -1)
-		atomic.AddInt64(&motorServer.numberOfMotor, -1)
-		log.Debugf("close connection with %s, there have %d connected motors", id, motorServer.numberOfMotor)
 		close(command)
-		motorServer.commandLock.Lock()
-		delete(motorServer.command, id)
-		motorServer.commandLock.Unlock()
+		motorClient.commandLock.Lock()
+		delete(motorClient.command, id)
+		motorClient.commandLock.Unlock()
+		motorClient.motorLock.Lock()
+		delete(motorClient.connectedMotor, id)
+		motorClient.motorLock.Unlock()
 	}()
-	ctx, cancel := context.WithCancel(motorServer.ctx)
+	ctx, cancel := context.WithCancel(motorClient.ctx)
 	defer cancel()
 	go func() {
-		for m := range command {
-			if sendCommand(c, m.id, m.content, result, 0) != nil {
-				cancel()
+		for {
+			select {
+			case <-ctx.Done():
 				return
+			case m := <-command:
+				for {
+					if sendCommand(c, m.id, m.content, result, 0) == nil {
+						break
+					}
+				}
 			}
 		}
 	}()
@@ -329,8 +263,22 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 			data, err := readData(r)
 			if err != nil {
 				log.Errorf("read motor: %s error: %s", id, err.Error())
-				cancel()
-				return
+				motorClient.motorLock.Lock()
+				delete(motorClient.connectedMotor, id)
+				motorClient.motorLock.Unlock()
+				c.Close()
+				i, err := strconv.Atoi(id)
+				if err == nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						c = connectMotor(id, ConfigInfo.MotorAddrList[i-1])
+					}
+				} else {
+					cancel()
+					return
+				}
 			} else {
 				log.Infof("receive data: %s from %s", data, id)
 				if data == "<OK>\r" {
