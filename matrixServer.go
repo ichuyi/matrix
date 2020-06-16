@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	hooks "matrix/hook"
 	"net"
@@ -36,8 +37,9 @@ type MotorResult struct {
 	lock    *sync.RWMutex
 }
 type Command struct {
-	id      string
-	content string
+	id       string
+	content  string
+	duration int64
 }
 type MotorServer struct {
 	command       map[string]chan *Command
@@ -46,6 +48,8 @@ type MotorServer struct {
 	connections   int64
 	ctx           context.Context
 	cancel        context.CancelFunc
+	startTime     time.Time
+	motorPowerOn  int64
 }
 
 func NewMotorServer() *MotorServer {
@@ -53,6 +57,7 @@ func NewMotorServer() *MotorServer {
 	m.command = make(map[string]chan *Command, ConfigInfo.MaxCommand)
 	m.commandLock = new(sync.RWMutex)
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.startTime = time.Now()
 	return m
 }
 
@@ -251,13 +256,21 @@ func handlerUnity(conn net.Conn) {
 				return
 			} else {
 				cmd := strings.Split(data, ",")
-				if len(cmd) != 2 {
+				if len(cmd) < 2 {
 					log.Errorf("incorrect data: %s", data)
 				} else {
 					log.Infof("receive command: %s", data)
 					m := Command{
 						id:      cmd[0],
 						content: cmd[1],
+					}
+					if len(cmd) > 2 {
+						d, err := strconv.ParseInt(cmd[2], 10, 64)
+						if err != nil {
+							log.Errorf("error: %s", err.Error())
+						} else {
+							m.duration = d
+						}
 					}
 					motorServer.commandLock.RLock()
 					c, ok := motorServer.command[m.id]
@@ -317,13 +330,19 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 	defer cancel()
 	go func() {
 		for m := range command {
-			if sendCommand(c, m.id, m.content, result, 0) != nil {
+			cmd := fmt.Sprintf("#%d %s", time.Now().Sub(motorServer.startTime).Milliseconds()+motorServer.motorPowerOn+m.duration, m.content)
+			if sendCommand(c, m.id, cmd, result, 0) != nil {
 				cancel()
 				return
 			}
 		}
 	}()
 	go func() {
+		reg, err := regexp.Compile("<[0-9]+>")
+		if err != nil {
+			log.Errorf("regexp compile error: %s", err.Error())
+			return
+		}
 		for {
 			r := bufio.NewReader(c)
 			data, err := readData(r)
@@ -333,6 +352,19 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 				return
 			} else {
 				log.Infof("receive data: %s from %s", data, id)
+				s := reg.FindString(data)
+				if s != "" {
+					s := s[1 : len(s)-2]
+					d, err := strconv.ParseInt(s, 10, 64)
+					if err != nil {
+						log.Errorf("%s parse to int error: %s", s, err.Error())
+						continue
+					} else {
+						//更新时间
+						motorServer.motorPowerOn = d
+						motorServer.startTime = time.Now()
+					}
+				}
 				if data == "<OK>\r" {
 					result.lock.Lock()
 					result.success = true
@@ -342,6 +374,22 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 
 		}
 	}()
+	if id == "480" {
+		go func() {
+			ticker := time.NewTicker(time.Hour * 6)
+			for {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					return
+				case <-ticker.C:
+					if sendCommand(c, id, "gtime", result, 0) != nil {
+						cancel()
+					}
+				}
+			}
+		}()
+	}
 	<-ctx.Done()
 }
 
