@@ -6,24 +6,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	log "github.com/sirupsen/logrus"
 	hooks "matrix/hook"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type ServerConfig struct {
-	LocalAddr      string `json:"local_addr"`
-	MaxCommand     int    `json:"max_command"`
-	Duration       int64  `json:"duration"`
-	MaxSendTimes   int    `json:"max_send_times"`
-	ReportDuration int    `json:"report_duration"`
-	MotorAddrList []string `json:"motor_addr_list"`
+	LocalAddr      string         `json:"local_addr"`
+	MaxCommand     int            `json:"max_command"`
+	Duration       int64          `json:"duration"`
+	MaxSendTimes   int            `json:"max_send_times"`
+	ReportDuration int            `json:"report_duration"`
+	MotorAddrList  map[string]string `json:"motor_addr_list"`
+	MaxReconnectTimes int `json:"max_reconnect_times"`
 }
 
 var configPath = "matrixConfig.json"
@@ -113,15 +114,7 @@ func main() {
 	}()
 	go func() {
 		for id := range ConfigInfo.MotorAddrList {
-			number := strconv.Itoa(id + 1)
-			conn := connectMotor(number, ConfigInfo.MotorAddrList[id])
-			r := &MotorResult{}
-			r.lock = new(sync.RWMutex)
-			command := make(chan *Command, ConfigInfo.MaxCommand)
-			motorClient.commandLock.Lock()
-			motorClient.command[number] = command
-			motorClient.commandLock.Unlock()
-			go handleMotor(conn, number, r, command)
+			go connectMotor(id, ConfigInfo.MotorAddrList[id])
 			time.Sleep(50 * time.Millisecond)
 		}
 	}()
@@ -138,7 +131,7 @@ func main() {
 	time.Sleep(5 * time.Second)
 	log.Println("closed server")
 }
-func connectMotor(number string, addr string) net.Conn {
+func connectMotor(number string, addr string) {
 	var conn net.Conn
 	var err error
 	for {
@@ -146,14 +139,41 @@ func connectMotor(number string, addr string) net.Conn {
 		if err == nil {
 			break
 		} else {
-			log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
+			//log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(30 * time.Second)
 	}
+	log.Infof("success to connect to motor %s", number)
 	motorClient.motorLock.Lock()
 	motorClient.connectedMotor[number] = struct{}{}
 	motorClient.motorLock.Unlock()
-	return conn
+	r := &MotorResult{}
+	r.lock = new(sync.RWMutex)
+	command := make(chan *Command, ConfigInfo.MaxCommand)
+	motorClient.commandLock.Lock()
+	motorClient.command[number] = command
+	motorClient.commandLock.Unlock()
+	go handleMotor(conn, number, r, command)
+}
+func fastConnectMotor(number string, addr string) (net.Conn,error) {
+	var conn net.Conn
+	var err error
+	i:=0
+	for {
+		conn, err = net.Dial("tcp", addr)
+		if err == nil||i>ConfigInfo.MaxReconnectTimes {
+			break
+		} else {
+			//log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
+		}
+		i++
+	}
+	if err==nil {
+		log.Infof("success to connect to motor %s", number)
+	}else{
+		log.Infof("failed to connect to motor %s",number)
+	}
+	return conn,err
 }
 func handlerUnity(conn net.Conn) {
 	defer func() {
@@ -249,11 +269,18 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 			case <-ctx.Done():
 				return
 			case m := <-command:
-				for {
-					if sendCommand(c, m.id, m.content, result, 0) == nil {
-						break
+					if sendCommand(c, m.id, m.content, result, 0) != nil {
+						var err error
+						c,err=fastConnectMotor(id,ConfigInfo.MotorAddrList[id])
+						if err!=nil{
+							cancel()
+							time.Sleep(5*time.Second)
+							go connectMotor(id,ConfigInfo.MotorAddrList[id])
+						}else{
+							_=sendCommand(c, m.id, m.content, result, 0)
+						}
 					}
-				}
+
 			}
 		}
 	}()
@@ -263,22 +290,19 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 			data, err := readData(r)
 			if err != nil {
 				log.Errorf("read motor: %s error: %s", id, err.Error())
-				motorClient.motorLock.Lock()
-				delete(motorClient.connectedMotor, id)
-				motorClient.motorLock.Unlock()
 				c.Close()
-				i, err := strconv.Atoi(id)
-				if err == nil {
 					select {
 					case <-ctx.Done():
 						return
 					default:
-						c = connectMotor(id, ConfigInfo.MotorAddrList[i-1])
+						var err error
+						c,err=fastConnectMotor(id,ConfigInfo.MotorAddrList[id])
+						if err!=nil{
+							cancel()
+							time.Sleep(5*time.Second)
+							go connectMotor(id,ConfigInfo.MotorAddrList[id])
+						}
 					}
-				} else {
-					cancel()
-					return
-				}
 			} else {
 				log.Infof("receive data: %s from %s", data, id)
 				if data == "<OK>\r" {
@@ -301,7 +325,7 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 	}()
 	if times > ConfigInfo.MaxSendTimes {
 		log.Infof("failed to send %s to %s, have send for %d times", cmd, id, times)
-		return nil
+		return errors.New("failed to send")
 	}
 	err := writeMotor(conn, id, cmd, result)
 	if err != nil {

@@ -12,20 +12,20 @@ func handleConnection(udpConn *net.UDPConn) {
 	buf := make([]byte, 1024)
 	fmt.Println(udpConn.RemoteAddr())
 	len, udpAddr, err := udpConn.ReadFromUDP(buf)
-	if err != nil{
+	if err != nil {
 		return
 	}
-	logContent := strings.Replace(string(buf),"\n","",1)
+	logContent := strings.Replace(string(buf), "\n", "", 1)
 	fmt.Println("server read len:", len)
 	fmt.Println("server read data:", logContent)
 
 	// 发送数据
 	len, err = udpConn.WriteToUDP([]byte("ok\r\n"), udpAddr)
-	if err != nil{
+	if err != nil {
 		return
 	}
 
-	fmt.Println("server write len:", len,"\n")
+	fmt.Println("server write len:", len, "\n")
 }
 
 // udp 服务端

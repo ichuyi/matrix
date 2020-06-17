@@ -130,7 +130,7 @@ func main() {
 	udpAddr, _ := net.ResolveUDPAddr("udp4", "127.0.0.1:9998")
 
 	//连接udpAddr，返回 udpConn
-	for i:=0;i<5;i++ {
+	for i := 0; i < 5; i++ {
 		udpConn, err := net.DialUDP("udp", nil, udpAddr)
 		if err != nil {
 			fmt.Println(err)
