@@ -6,25 +6,32 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	log "github.com/sirupsen/logrus"
+	"math/rand"
 	hooks "matrix/hook"
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type ServerConfig struct {
-	LocalAddr      string         `json:"local_addr"`
-	MaxCommand     int            `json:"max_command"`
-	Duration       int64          `json:"duration"`
-	MaxSendTimes   int            `json:"max_send_times"`
-	ReportDuration int            `json:"report_duration"`
-	MotorAddrList  map[string]string `json:"motor_addr_list"`
-	MaxReconnectTimes int `json:"max_reconnect_times"`
+	LocalAddr         string            `json:"local_addr"`
+	MaxCommand        int               `json:"max_command"`
+	Duration          int64             `json:"execTime"`
+	MaxSendTimes      int               `json:"max_send_times"`
+	ReportDuration    int               `json:"report_duration"`
+	MotorAddrList     map[string]string `json:"motor_addr_list"`
+	MaxReconnectTimes int               `json:"max_reconnect_times"`
+	SyncTimeMotors    []string          `json:"sync_time_motors"`
+	SyncTimeGroupSize int               `json:"sync_time_group_size"`
+	SendTimeDuration  int               `json:"send_time_duration"`
+	SendGroupSize     int               `json:"send_group_size"`
 }
 
 var configPath = "matrixConfig.json"
@@ -36,8 +43,10 @@ type MotorResult struct {
 	lock    *sync.RWMutex
 }
 type Command struct {
-	id      string
-	content string
+	id         string
+	content    string
+	execTime   int64
+	needResend bool
 }
 type MotorClient struct {
 	command        map[string]chan *Command
@@ -46,6 +55,9 @@ type MotorClient struct {
 	cancel         context.CancelFunc
 	connectedMotor map[string]struct{}
 	motorLock      *sync.RWMutex
+	syncTime       []time.Time
+	motorPowerOn   []int64
+	startTime      time.Time
 }
 
 func NewMotorClient() *MotorClient {
@@ -55,6 +67,13 @@ func NewMotorClient() *MotorClient {
 	m.connectedMotor = make(map[string]struct{})
 	m.motorLock = new(sync.RWMutex)
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.syncTime = make([]time.Time, len(ConfigInfo.SyncTimeMotors))
+	m.motorPowerOn = make([]int64, len(ConfigInfo.SyncTimeMotors))
+	for i := 0; i < len(ConfigInfo.SyncTimeMotors); i++ {
+		m.syncTime[i] = time.Now()
+		m.motorPowerOn[i] = 0
+	}
+	m.startTime = time.Now()
 	return m
 }
 
@@ -88,6 +107,7 @@ func init() {
 	parse()
 	initLog()
 	motorClient = NewMotorClient()
+	rand.Seed(time.Now().UnixNano())
 }
 func main() {
 	defer func() {
@@ -143,7 +163,7 @@ func connectMotor(number string, addr string) {
 		}
 		time.Sleep(30 * time.Second)
 	}
-	log.Infof("success to connect to motor %s", number)
+	//	log.Infof("success to connect to motor %s", number)
 	motorClient.motorLock.Lock()
 	motorClient.connectedMotor[number] = struct{}{}
 	motorClient.motorLock.Unlock()
@@ -155,25 +175,25 @@ func connectMotor(number string, addr string) {
 	motorClient.commandLock.Unlock()
 	go handleMotor(conn, number, r, command)
 }
-func fastConnectMotor(number string, addr string) (net.Conn,error) {
+func fastConnectMotor(number string, addr string) (net.Conn, error) {
 	var conn net.Conn
 	var err error
-	i:=0
+	i := 0
 	for {
 		conn, err = net.Dial("tcp", addr)
-		if err == nil||i>ConfigInfo.MaxReconnectTimes {
+		if err == nil || i > ConfigInfo.MaxReconnectTimes {
 			break
 		} else {
 			//log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
 		}
 		i++
 	}
-	if err==nil {
-		log.Infof("success to connect to motor %s", number)
-	}else{
-		log.Infof("failed to connect to motor %s",number)
+	if err == nil {
+		//	log.Infof("success to connect to motor %s", number)
+	} else {
+		//	log.Infof("failed to connect to motor %s", number)
 	}
-	return conn,err
+	return conn, err
 }
 func handlerUnity(conn net.Conn) {
 	defer func() {
@@ -188,10 +208,15 @@ func handlerUnity(conn net.Conn) {
 	defer cancel()
 	r := bufio.NewReader(conn)
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
 		for {
 			data, err := readData(r)
 			if err != nil {
-				log.Errorf("read data error: %s", err.Error())
+				//	log.Errorf("read data error: %s", err.Error())
 				cancel()
 				return
 			} else if strings.Contains(data, "quit") {
@@ -199,13 +224,32 @@ func handlerUnity(conn net.Conn) {
 				return
 			} else {
 				cmd := strings.Split(data, ",")
-				if len(cmd) != 2 {
+				if len(cmd) < 2 {
 					log.Errorf("incorrect data: %s", data)
 				} else {
 					log.Infof("receive command: %s", data)
 					m := Command{
-						id:      cmd[0],
-						content: cmd[1],
+						id:         cmd[0],
+						content:    cmd[1],
+						needResend: true,
+					}
+					if len(cmd) > 2 {
+						t, err := time.Parse("2006-01-02 15:04:05", cmd[2])
+						if err != nil {
+							log.Errorf("error: %s", err.Error())
+						} else {
+							d, err := strconv.Atoi(m.id)
+							if err != nil {
+								log.Errorf("parse id to int error: %s", err.Error())
+								return
+							}
+							if ConfigInfo.SyncTimeGroupSize == 0 {
+								log.Errorf("sync_time_group_size is 0")
+								return
+							}
+							g := (d - 1) / ConfigInfo.SyncTimeGroupSize
+							m.execTime = t.Sub(motorClient.syncTime[g]).Milliseconds() + motorClient.motorPowerOn[g]
+						}
 					}
 					motorClient.commandLock.RLock()
 					c, ok := motorClient.command[m.id]
@@ -220,11 +264,17 @@ func handlerUnity(conn net.Conn) {
 						log.Infof("motor %s doesn't exist", m.id)
 					}
 				}
+
 			}
 		}
 
 	}()
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
 		ticker := time.NewTicker(time.Duration(ConfigInfo.ReportDuration) * time.Second)
 		for {
 			select {
@@ -263,48 +313,110 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 	}()
 	ctx, cancel := context.WithCancel(motorClient.ctx)
 	defer cancel()
+	d, err := strconv.Atoi(id)
+	if err != nil {
+		log.Errorf("parse id to int error: %s", err.Error())
+		return
+	}
+	if ConfigInfo.SyncTimeGroupSize == 0 {
+		log.Errorf("sync_time_group_size is 0")
+	}
+	g := (d - 1) / ConfigInfo.SyncTimeGroupSize
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
+		timer := time.NewTimer(time.Duration(ConfigInfo.SendTimeDuration) * time.Millisecond)
+		var totalSendDuration = (int64)(len(ConfigInfo.MotorAddrList) / ConfigInfo.SendGroupSize * ConfigInfo.SendTimeDuration)
+		var motorSendDuration = (int64)((d - 1) / ConfigInfo.SendGroupSize * ConfigInfo.SendTimeDuration)
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case m := <-command:
-					if sendCommand(c, m.id, m.content, result, 0) != nil {
-						var err error
-						c,err=fastConnectMotor(id,ConfigInfo.MotorAddrList[id])
-						if err!=nil{
-							cancel()
-							time.Sleep(5*time.Second)
-							go connectMotor(id,ConfigInfo.MotorAddrList[id])
-						}else{
-							_=sendCommand(c, m.id, m.content, result, 0)
-						}
+
+				cmd := ""
+				if m.execTime > 0 {
+					cmd = fmt.Sprintf("$%d %s", m.execTime, m.content)
+				} else {
+					cmd = m.content
+				}
+				<-timer.C
+				timer.Reset(time.Duration(ConfigInfo.SendTimeDuration) * time.Millisecond)
+				n := time.Now().Sub(motorClient.startTime).Milliseconds()
+				t := n%totalSendDuration - motorSendDuration
+				for t > 0 && t < (int64)(ConfigInfo.SendTimeDuration) {
+					time.Sleep(10 * time.Millisecond)
+					n = time.Now().Sub(motorClient.startTime).Milliseconds()
+					t = n%totalSendDuration - motorSendDuration
+				}
+				times := ConfigInfo.MaxSendTimes
+				if m.needResend {
+					times = 0
+				}
+				if sendCommand(c, m.id, cmd, result, times) != nil {
+					var err error
+					c, err = fastConnectMotor(id, ConfigInfo.MotorAddrList[id])
+					if err != nil {
+						log.Errorf("can't connect to motor %s", id)
+						cancel()
+						time.Sleep(5 * time.Second)
+						go connectMotor(id, ConfigInfo.MotorAddrList[id])
+					} else {
+						_ = sendCommand(c, m.id, cmd, result, times)
 					}
+				}
 
 			}
 		}
 	}()
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
+		reg, err := regexp.Compile("<[0-9]+>")
+		if err != nil {
+			log.Errorf("regexp compile error: %s", err.Error())
+			return
+		}
 		for {
 			r := bufio.NewReader(c)
 			data, err := readData(r)
 			if err != nil {
-				log.Errorf("read motor: %s error: %s", id, err.Error())
+				//	log.Errorf("read motor: %s error: %s", id, err.Error())
 				c.Close()
-					select {
-					case <-ctx.Done():
-						return
-					default:
-						var err error
-						c,err=fastConnectMotor(id,ConfigInfo.MotorAddrList[id])
-						if err!=nil{
-							cancel()
-							time.Sleep(5*time.Second)
-							go connectMotor(id,ConfigInfo.MotorAddrList[id])
-						}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					var err error
+					c, err = fastConnectMotor(id, ConfigInfo.MotorAddrList[id])
+					if err != nil {
+						cancel()
+						time.Sleep(5 * time.Second)
+						go connectMotor(id, ConfigInfo.MotorAddrList[id])
 					}
+				}
 			} else {
 				log.Infof("receive data: %s from %s", data, id)
+				s := reg.FindString(data)
+				if s != "" {
+					s := s[1 : len(s)-1]
+					d, err := strconv.ParseInt(s, 10, 64)
+					if err != nil {
+						log.Errorf("%s parse to int error: %s", s, err.Error())
+						continue
+					} else {
+						//更新时间
+						motorClient.motorPowerOn[g] = d
+						motorClient.syncTime[g] = time.Now().UTC()
+					}
+				}
 				if data == "<OK>\r" {
 					result.lock.Lock()
 					result.success = true
@@ -314,9 +426,64 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 
 		}
 	}()
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if len(command) == 0 {
+					command <- &Command{
+						id:      id,
+						content: "greet",
+					}
+				}
+			}
+		}
+	}()
+	//分组时间同步
+	if isExist(ConfigInfo.SyncTimeMotors, id) {
+		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					log.Error("panic: ", p)
+				}
+			}()
+			if err := sendCommand(c, id, "gtime", result, 0); err != nil {
+				log.Errorf("sync time error: %s", err.Error())
+			}
+			ticker := time.NewTicker(time.Hour * 6)
+			for {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					return
+				case <-ticker.C:
+					if err := sendCommand(c, id, "gtime", result, 0); err != nil {
+						log.Errorf("sync time error: %s", err.Error())
+					}
+				}
+			}
+		}()
+	}
+
 	<-ctx.Done()
 }
-
+func isExist(a []string, s string) bool {
+	for i := range a {
+		if a[i] == s {
+			return true
+		}
+	}
+	return false
+}
 func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, times int) error {
 	defer func() {
 		if err := recover(); err != nil {
@@ -325,7 +492,8 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 	}()
 	if times > ConfigInfo.MaxSendTimes {
 		log.Infof("failed to send %s to %s, have send for %d times", cmd, id, times)
-		return errors.New("failed to send")
+		//return errors.New("failed to send")
+		return nil
 	}
 	err := writeMotor(conn, id, cmd, result)
 	if err != nil {
@@ -337,6 +505,7 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 	for {
 		select {
 		case <-ctx.Done():
+			time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
 			return sendCommand(conn, id, cmd, result, times+1)
 		default:
 			result.lock.RLock()
@@ -370,7 +539,7 @@ func writeMotor(c net.Conn, id string, cmd string, result *MotorResult) error {
 		log.Errorf("failed to send command :%s to motor: %s", cmd, id)
 		return err
 	} else {
-		log.Infof("send %s to motor %s", cmd, id)
+		//	log.Infof("send %s to motor %s", cmd, id)
 		return nil
 	}
 }

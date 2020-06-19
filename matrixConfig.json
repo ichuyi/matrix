@@ -1,10 +1,14 @@
 {
   "local_addr": "0.0.0.0:5588",
   "max_command": 20,
-  "duration": 400,
+  "duration": 500,
   "max_send_times": 2,
   "report_duration": 5,
   "max_reconnect_times": 2,
+  "sync_time_motors": ["200","400","600"],
+  "sync_time_group_size": 200,
+  "send_time_duration": 200,
+  "send_group_size": 60,
   "motor_addr_list": {
     "1": "192.168.11.20:333",
     "10": "192.168.11.29:333",
