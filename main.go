@@ -6,7 +6,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"matrix/dao"
 	"matrix/handler"
-	"matrix/socket"
 	"matrix/util"
 	"net/http"
 	"os"
@@ -36,16 +35,22 @@ func init() {
 	dao.InitDB()
 }
 func main() {
-	defer close(socket.Message)
 	r := handler.InitRouter()
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", util.ConfigInfo.Service.Port),
 		Handler: r,
 	}
 	go func() {
-		// 服务连接
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+		if util.ConfigInfo.Service.CertFile != "" && util.ConfigInfo.Service.KeyFile != "" {
+			// 服务连接   HTTPS
+			if err := server.ListenAndServeTLS(util.ConfigInfo.Service.CertFile, util.ConfigInfo.Service.KeyFile); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("listen: %s\n", err)
+			}
+		} else {
+			// 服务连接   HTTP
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("listen: %s\n", err)
+			}
 		}
 	}()
 

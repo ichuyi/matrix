@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	log "github.com/sirupsen/logrus"
+	"math/rand"
 	hooks "matrix/hook"
 	"net"
 	"os"
@@ -16,16 +17,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type ServerConfig struct {
-	Addr           string `json:"addr"`
-	MaxCommand     int    `json:"max_command"`
-	Duration       int64  `json:"duration"`
-	MaxSendTimes   int    `json:"max_send_times"`
-	ReportDuration int    `json:"report_duration"`
+	LocalAddr         string            `json:"local_addr"`      //监听本机地址TCP链接
+	MaxCommand        int               `json:"max_command"`    //每个电机的命令队列的长度
+	Duration          int64             `json:"duration"`    //等待OK的时间 毫秒
+	MaxSendTimes      int               `json:"max_send_times"`   //每个命令最多发送次数
+	ReportDuration    int               `json:"report_duration"`   //报告连接的电机信息的时间间隔  秒
+	MotorAddrList     map[string]string `json:"motor_addr_list"`   //电机的编号与ip
+	MaxReconnectTimes int               `json:"max_reconnect_times"`   //快速重连最大次数
+	SyncTimeMotors    []string          `json:"sync_time_motors"`    //需要发送时间同步命令的电机
+	SyncTimeGroupSize int               `json:"sync_time_group_size"`    //时间同步每组的电机数
+	SendTimeDuration  int               `json:"send_time_duration"`   //错峰发送 时间段的长度 毫秒
+	SendGroupSize     int               `json:"send_group_size"`    //错峰发送 每个时间段可以发送命令的电机数
 }
 
 var configPath = "matrixConfig.json"
@@ -37,31 +43,41 @@ type MotorResult struct {
 	lock    *sync.RWMutex
 }
 type Command struct {
-	id       string
-	content  string
-	duration int64
+	id         string    //电机编号
+	content    string    //命令内容
+	execTime   int64   //命令的执行时间
+	needResend bool   //如果发送失败是否需要重发
 }
-type MotorServer struct {
-	command       map[string]chan *Command
-	commandLock   *sync.RWMutex
-	numberOfMotor int64
-	connections   int64
-	ctx           context.Context
-	cancel        context.CancelFunc
-	startTime     time.Time
-	motorPowerOn  int64
+type MotorClient struct {
+	command        map[string]chan *Command    //命令队列
+	commandLock    *sync.RWMutex
+	ctx            context.Context
+	cancel         context.CancelFunc
+	connectedMotor map[string]struct{}   //成功连接的电机
+	motorLock      *sync.RWMutex
+	syncTime       []time.Time   //电机返回上电时间的时间
+	motorPowerOn   []int64    //电机上电后的毫秒数
+	startTime      time.Time   //程序启动的时刻
 }
 
-func NewMotorServer() *MotorServer {
-	m := new(MotorServer)
+func NewMotorClient() *MotorClient {
+	m := new(MotorClient)
 	m.command = make(map[string]chan *Command, ConfigInfo.MaxCommand)
 	m.commandLock = new(sync.RWMutex)
+	m.connectedMotor = make(map[string]struct{})
+	m.motorLock = new(sync.RWMutex)
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.syncTime = make([]time.Time, len(ConfigInfo.SyncTimeMotors))
+	m.motorPowerOn = make([]int64, len(ConfigInfo.SyncTimeMotors))
+	for i := 0; i < len(ConfigInfo.SyncTimeMotors); i++ {
+		m.syncTime[i] = time.Now()
+		m.motorPowerOn[i] = 0
+	}
 	m.startTime = time.Now()
 	return m
 }
 
-var motorServer *MotorServer
+var motorClient *MotorClient
 
 func parse() {
 	conf, err := os.Open(configPath)
@@ -90,7 +106,8 @@ func initLog() {
 func init() {
 	parse()
 	initLog()
-	motorServer = NewMotorServer()
+	motorClient = NewMotorClient()
+	rand.Seed(time.Now().UnixNano())
 }
 func main() {
 	defer func() {
@@ -99,30 +116,34 @@ func main() {
 		}
 	}()
 	quit = make(chan os.Signal)
-	listener, err := net.Listen("tcp", ConfigInfo.Addr)
+	listener, err := net.Listen("tcp", ConfigInfo.LocalAddr)
 	if err != nil {
-		log.Fatalf("%s listen error: %s", ConfigInfo.Addr, err.Error())
+		log.Fatalf("%s listen error: %s", ConfigInfo.LocalAddr, err.Error())
 	}
-	log.Infof("start to listen, addr is: %s", ConfigInfo.Addr)
+	log.Infof("start to listen, addr is: %s", ConfigInfo.LocalAddr)
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				log.Errorf("%s accept error: %s", ConfigInfo.Addr, err.Error())
+				log.Errorf("%s accept error: %s", ConfigInfo.LocalAddr, err.Error())
 				return
 			} else {
-				atomic.AddInt64(&motorServer.connections, 1)
-				log.Debugf("%d connections", motorServer.connections)
-				go handlerConn(conn)
+				go handlerUnity(conn)
 			}
+		}
+	}()
+	go func() {
+		for id := range ConfigInfo.MotorAddrList {
+			go connectMotor(id, ConfigInfo.MotorAddrList[id])
+			time.Sleep(50 * time.Millisecond)
 		}
 	}()
 	signal.Notify(quit)
 	select {
 	case <-quit:
-	case <-motorServer.ctx.Done():
+	case <-motorClient.ctx.Done():
 	}
-	motorServer.cancel()
+	motorClient.cancel()
 	log.Println("start closing server...")
 	if listener != nil {
 		listener.Close()
@@ -130,109 +151,50 @@ func main() {
 	time.Sleep(5 * time.Second)
 	log.Println("closed server")
 }
-func handlerConn(conn net.Conn) {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Errorf("panic error: %v", err)
+func connectMotor(number string, addr string) {
+	var conn net.Conn
+	var err error
+	for {
+		conn, err = net.Dial("tcp", addr)
+		if err == nil {
+			break
+		} else {
+			//log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
 		}
-	}()
-	ctx, cancel := context.WithCancel(motorServer.ctx)
-	defer cancel()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				_, err := writeData(conn, "sid")
-				if err != nil {
-					log.Errorf("connection is closed,error: %s,remote addr: %s", err.Error(), conn.RemoteAddr())
-					conn.Close()
-					atomic.AddInt64(&motorServer.connections, -1)
-					return
-				}
-				time.Sleep(10 * time.Second)
-			}
-		}
-	}()
-
-	r := bufio.NewReader(conn)
-	go func() {
-		for {
-			recs, err := readData(r)
-			if err != nil {
-				log.Errorf("connection is closed,error: %s,remote addr: %s", err.Error(), conn.RemoteAddr())
-				conn.Close()
-				atomic.AddInt64(&motorServer.connections, -1)
-				return
-			}
-			log.Infof("receive %s from %s", recs, conn.RemoteAddr())
-			r, err := regexp.Compile("<[0-9]+>")
-			if err != nil {
-				log.Errorf("regex compile error: %s", err.Error())
-				conn.Close()
-				atomic.AddInt64(&motorServer.connections, -1)
-				return
-			}
-			data := r.FindString(recs)
-			if data != "" {
-				s := data[1 : len(data)-1]
-				if id, err := strconv.Atoi(s); err != nil {
-					log.Errorf("response to sid error: %s,response is %s", err.Error(), s)
-					continue
-				} else {
-					cancel()
-					if id > 0 {
-						atomic.AddInt64(&motorServer.numberOfMotor, 1)
-						log.Debugf("motor %s has connected, there have %d connected motors", s, motorServer.numberOfMotor)
-						r := new(MotorResult)
-						r.lock = new(sync.RWMutex)
-						c := make(chan *Command, ConfigInfo.MaxCommand)
-						motorServer.commandLock.Lock()
-						motorServer.command[s] = c
-						motorServer.commandLock.Unlock()
-						go handleMotor(conn, s, r, c)
-					} else {
-						go handlerUnity(conn)
-					}
-					return
-				}
-			} else if strings.Contains(recs, "<admin>") {
-				cancel()
-				go handlerAdmin(conn)
-				return
-			}
-		}
-	}()
-	<-motorServer.ctx.Done()
+		time.Sleep(30 * time.Second)
+	}
+	//	log.Infof("success to connect to motor %s", number)
+	motorClient.motorLock.Lock()
+	motorClient.connectedMotor[number] = struct{}{}
+	motorClient.motorLock.Unlock()
+	r := &MotorResult{}
+	r.lock = new(sync.RWMutex)
+	command := make(chan *Command, ConfigInfo.MaxCommand)
+	motorClient.commandLock.Lock()
+	motorClient.command[number] = command
+	motorClient.commandLock.Unlock()
+	go handleMotor(conn, number, r, command)
 }
-func handlerAdmin(conn net.Conn) {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Errorf("panic error: %v", err)
+//若在发送命令的时候失败，则调用该方法重新连接
+func fastConnectMotor(number string, addr string) (net.Conn, error) {
+	var conn net.Conn
+	var err error
+	i := 0
+	for {
+		conn, err = net.Dial("tcp", addr)
+		if err == nil || i > ConfigInfo.MaxReconnectTimes {
+			break
+		} else {
+			//log.Errorf("connect to motor %s error: %s, raddr is %s", number, err.Error(), addr)
 		}
-	}()
-	defer func() {
-		conn.Close()
-		atomic.AddInt64(&motorServer.connections, -1)
-	}()
-	r := bufio.NewReader(conn)
-	ctx, cancel := context.WithCancel(motorServer.ctx)
-	defer cancel()
-	go func() {
-		for {
-			data, err := readData(r)
-			if err != nil {
-				log.Errorf("read data error: %s", err.Error())
-				cancel()
-				return
-			} else if strings.Contains(data, "quit") {
-				motorServer.cancel()
-			}
-
-		}
-	}()
-	<-ctx.Done()
+		i++
+	}
+	if err == nil {
+		//	log.Infof("success to connect to motor %s", number)
+	} else {
+		//	log.Infof("failed to connect to motor %s", number)
+	}
+	return conn, err
 }
 func handlerUnity(conn net.Conn) {
 	defer func() {
@@ -242,17 +204,24 @@ func handlerUnity(conn net.Conn) {
 	}()
 	defer func() {
 		conn.Close()
-		atomic.AddInt64(&motorServer.connections, -1)
 	}()
-	ctx, cancel := context.WithCancel(motorServer.ctx)
+	ctx, cancel := context.WithCancel(motorClient.ctx)
 	defer cancel()
 	r := bufio.NewReader(conn)
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
 		for {
 			data, err := readData(r)
 			if err != nil {
-				log.Errorf("read data error: %s", err.Error())
+				//	log.Errorf("read data error: %s", err.Error())
 				cancel()
+				return
+			} else if strings.Contains(data, "quit") {   //收到quit命令，开始关闭程序
+				motorClient.cancel()
 				return
 			} else {
 				cmd := strings.Split(data, ",")
@@ -261,20 +230,31 @@ func handlerUnity(conn net.Conn) {
 				} else {
 					log.Infof("receive command: %s", data)
 					m := Command{
-						id:      cmd[0],
-						content: cmd[1],
+						id:         cmd[0],
+						content:    cmd[1],
+						needResend: true,
 					}
-					if len(cmd) > 2 {
-						d, err := strconv.ParseInt(cmd[2], 10, 64)
+					if len(cmd) > 2 {    //命令有带时间参数,将时间转化成电机的时间
+						t, err := time.Parse("2006-01-02 15:04:05", cmd[2])
 						if err != nil {
 							log.Errorf("error: %s", err.Error())
 						} else {
-							m.duration = d
+							d, err := strconv.Atoi(m.id)
+							if err != nil {
+								log.Errorf("parse id to int error: %s", err.Error())
+								return
+							}
+							if ConfigInfo.SyncTimeGroupSize == 0 {
+								log.Errorf("sync_time_group_size is 0")
+								return
+							}
+							g := (d - 1) / ConfigInfo.SyncTimeGroupSize
+							m.execTime = t.Sub(motorClient.syncTime[g]).Milliseconds() + motorClient.motorPowerOn[g]
 						}
 					}
-					motorServer.commandLock.RLock()
-					c, ok := motorServer.command[m.id]
-					motorServer.commandLock.RUnlock()
+					motorClient.commandLock.RLock()
+					c, ok := motorClient.command[m.id]
+					motorClient.commandLock.RUnlock()
 					if ok {
 						select {
 						case c <- &m:
@@ -285,11 +265,17 @@ func handlerUnity(conn net.Conn) {
 						log.Infof("motor %s doesn't exist", m.id)
 					}
 				}
+
 			}
 		}
 
 	}()
-	go func() {
+	go func() {    //报告当前成功连接的电机信息
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
 		ticker := time.NewTicker(time.Duration(ConfigInfo.ReportDuration) * time.Second)
 		for {
 			select {
@@ -297,12 +283,12 @@ func handlerUnity(conn net.Conn) {
 				ticker.Stop()
 				return
 			case <-ticker.C:
-				motorServer.commandLock.RLock()
-				motor := make([]string, 0, len(motorServer.command))
-				for k := range motorServer.command {
+				motorClient.motorLock.RLock()
+				motor := make([]string, 0, len(motorClient.connectedMotor))
+				for k := range motorClient.connectedMotor {
 					motor = append(motor, k)
 				}
-				motorServer.commandLock.RUnlock()
+				motorClient.motorLock.RUnlock()
 				writeData(conn, strings.Join(motor, ","))
 			}
 		}
@@ -316,28 +302,87 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 			log.Errorf("panic error: %v", err)
 		}
 	}()
-	defer func() {
+	defer func() {   //资源释放
 		c.Close()
-		atomic.AddInt64(&motorServer.connections, -1)
-		atomic.AddInt64(&motorServer.numberOfMotor, -1)
-		log.Debugf("close connection with %s, there have %d connected motors", id, motorServer.numberOfMotor)
 		close(command)
-		motorServer.commandLock.Lock()
-		delete(motorServer.command, id)
-		motorServer.commandLock.Unlock()
+		motorClient.commandLock.Lock()
+		delete(motorClient.command, id)
+		motorClient.commandLock.Unlock()
+		motorClient.motorLock.Lock()
+		delete(motorClient.connectedMotor, id)
+		motorClient.motorLock.Unlock()
 	}()
-	ctx, cancel := context.WithCancel(motorServer.ctx)
+	ctx, cancel := context.WithCancel(motorClient.ctx)
 	defer cancel()
+	d, err := strconv.Atoi(id)
+	if err != nil {
+		log.Errorf("parse id to int error: %s", err.Error())
+		return
+	}
+	if ConfigInfo.SyncTimeGroupSize == 0 {
+		log.Errorf("sync_time_group_size is 0")
+	}
+	g := (d - 1) / ConfigInfo.SyncTimeGroupSize
 	go func() {
-		for m := range command {
-			cmd := fmt.Sprintf("#%d %s", time.Now().Sub(motorServer.startTime).Milliseconds()+motorServer.motorPowerOn+m.duration, m.content)
-			if sendCommand(c, m.id, cmd, result, 0) != nil {
-				cancel()
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
+		timer := time.NewTimer(time.Duration(ConfigInfo.SendTimeDuration) * time.Millisecond)
+		var totalSendDuration = (int64)(len(ConfigInfo.MotorAddrList) / ConfigInfo.SendGroupSize * ConfigInfo.SendTimeDuration)
+		var motorSendDuration = (int64)((d - 1) / ConfigInfo.SendGroupSize * ConfigInfo.SendTimeDuration)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
 				return
+			case m := <-command:
+
+				cmd := ""
+				if m.execTime > 0 {
+					cmd = fmt.Sprintf("$%d %s", m.execTime, m.content)
+				} else {
+					cmd = m.content
+				}
+				<-timer.C
+				timer.Reset(time.Duration(ConfigInfo.SendTimeDuration) * time.Millisecond)
+				n := time.Now().Sub(motorClient.startTime).Milliseconds()
+				t := n%totalSendDuration - motorSendDuration
+				for t > 0 && t < (int64)(ConfigInfo.SendTimeDuration) {     //只能在特定的时间段向某个电机发送命令
+					time.Sleep(10 * time.Millisecond)
+					n = time.Now().Sub(motorClient.startTime).Milliseconds()
+					t = n%totalSendDuration - motorSendDuration
+				}
+				times := ConfigInfo.MaxSendTimes
+				if m.needResend {
+					times = 0
+				}
+				if sendCommand(c, m.id, cmd, result, times) != nil {
+					var err error
+					//重连
+					c, err = fastConnectMotor(id, ConfigInfo.MotorAddrList[id])
+					if err != nil {
+						//重连失败，放弃该命令以及之后的命令
+						log.Errorf("can't connect to motor %s", id)
+						cancel()
+						time.Sleep(5 * time.Second)
+						//每隔30秒重新连接一次电机
+						go connectMotor(id, ConfigInfo.MotorAddrList[id])
+					} else {
+						_ = sendCommand(c, m.id, cmd, result, times)
+					}
+				}
+
 			}
 		}
 	}()
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
 		reg, err := regexp.Compile("<[0-9]+>")
 		if err != nil {
 			log.Errorf("regexp compile error: %s", err.Error())
@@ -347,25 +392,39 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 			r := bufio.NewReader(c)
 			data, err := readData(r)
 			if err != nil {
-				log.Errorf("read motor: %s error: %s", id, err.Error())
-				cancel()
-				return
+				//	log.Errorf("read motor: %s error: %s", id, err.Error())
+				c.Close()
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					var err error
+					c, err = fastConnectMotor(id, ConfigInfo.MotorAddrList[id])
+					if err != nil {
+						cancel()
+						time.Sleep(5 * time.Second)
+						go connectMotor(id, ConfigInfo.MotorAddrList[id])
+					}
+				}
 			} else {
-				log.Infof("receive data: %s from %s", data, id)
+				if !strings.Contains(data,"FAIL") {
+					log.Infof("receive data: %s from %s", data, id)
+				}
 				s := reg.FindString(data)
 				if s != "" {
-					s := s[1 : len(s)-2]
+					s := s[1 : len(s)-1]
 					d, err := strconv.ParseInt(s, 10, 64)
 					if err != nil {
 						log.Errorf("%s parse to int error: %s", s, err.Error())
 						continue
 					} else {
 						//更新时间
-						motorServer.motorPowerOn = d
-						motorServer.startTime = time.Now()
+						motorClient.motorPowerOn[g] = d
+						motorClient.syncTime[g] = time.Now().UTC()
 					}
 				}
 				if data == "<OK>\r" {
+					//回复OK，表示发送的命令电机收到了
 					result.lock.Lock()
 					result.success = true
 					result.lock.Unlock()
@@ -374,8 +433,40 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 
 		}
 	}()
-	if id == "480" {
+	go func() {
+		//心跳，保持连接不被关闭
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic: ", p)
+			}
+		}()
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if len(command) == 0 {
+					command <- &Command{
+						id:      id,
+						content: "greet",
+					}
+				}
+			}
+		}
+	}()
+	//分组时间同步
+	if isExist(ConfigInfo.SyncTimeMotors, id) {
 		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					log.Error("panic: ", p)
+				}
+			}()
+			if err := sendCommand(c, id, "gtime", result, 0); err != nil {
+				log.Errorf("sync time error: %s", err.Error())
+			}
 			ticker := time.NewTicker(time.Hour * 6)
 			for {
 				select {
@@ -383,16 +474,24 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 					ticker.Stop()
 					return
 				case <-ticker.C:
-					if sendCommand(c, id, "gtime", result, 0) != nil {
-						cancel()
+					if err := sendCommand(c, id, "gtime", result, 0); err != nil {
+						log.Errorf("sync time error: %s", err.Error())
 					}
 				}
 			}
 		}()
 	}
+
 	<-ctx.Done()
 }
-
+func isExist(a []string, s string) bool {
+	for i := range a {
+		if a[i] == s {
+			return true
+		}
+	}
+	return false
+}
 func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, times int) error {
 	defer func() {
 		if err := recover(); err != nil {
@@ -400,7 +499,10 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 		}
 	}()
 	if times > ConfigInfo.MaxSendTimes {
-		log.Infof("failed to send %s to %s, have send for %d times", cmd, id, times)
+		if !strings.Contains(cmd,"greet") {
+			log.Infof("failed to send %s to %s, have send for %d times", cmd, id, times)
+		}
+		//return errors.New("failed to send")
 		return nil
 	}
 	err := writeMotor(conn, id, cmd, result)
@@ -413,6 +515,8 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 	for {
 		select {
 		case <-ctx.Done():
+			//超时重传
+			time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
 			return sendCommand(conn, id, cmd, result, times+1)
 		default:
 			result.lock.RLock()
@@ -446,7 +550,7 @@ func writeMotor(c net.Conn, id string, cmd string, result *MotorResult) error {
 		log.Errorf("failed to send command :%s to motor: %s", cmd, id)
 		return err
 	} else {
-		log.Infof("send %s to motor %s", cmd, id)
+		//	log.Infof("send %s to motor %s", cmd, id)
 		return nil
 	}
 }

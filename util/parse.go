@@ -18,16 +18,19 @@ type MySQLConfig struct {
 type ServiceConfig struct {
 	Port     string `json:"port"`
 	LogLevel int    `json:"log_level"`
+	CertFile string `json:"cert_file"`
+	KeyFile string `json:"key_file"`
 }
 type MatrixConfig struct {
 	Length int `json:"length"`
 	Width  int `json:"width"`
 }
 type SocketConfig struct {
-	Laddr      string `json:"laddr"`
-	Delimiter  string `json:"delimiter"`
-	MaxMessage int    `json:"max_message"`
-	Duration   int    `json:"duration"`
+	UnityLaddr   string `json:"unity_laddr"`
+	ForwardLaddr string `json:"forward_laddr"`
+	Delimiter    string `json:"delimiter"`
+	MaxMessage   int    `json:"max_message"`
+	Duration     int    `json:"duration"`
 	//	Confirm    string `json:"confirm"`
 }
 type Config struct {
