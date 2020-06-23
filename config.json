@@ -1,14 +1,16 @@
 {
   "service": {
     "port": "12345",
-    "log_level": 2
+    "log_level": 2,
+    "cert_file": "",
+    "key_file": ""
   },
   "mysql": {
-    "host": "120.55.115.201",
-    "port": "3600",
-    "user": "root",
-    "password": "191400",
-    "database": "course"
+    "host": "",
+    "port": "",
+    "user": "",
+    "password": "",
+    "database": ""
   },
   "matrix": {
     "length": 30,

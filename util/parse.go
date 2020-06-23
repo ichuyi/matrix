@@ -18,6 +18,8 @@ type MySQLConfig struct {
 type ServiceConfig struct {
 	Port     string `json:"port"`
 	LogLevel int    `json:"log_level"`
+	CertFile string `json:"cert_file"`
+	KeyFile string `json:"key_file"`
 }
 type MatrixConfig struct {
 	Length int `json:"length"`

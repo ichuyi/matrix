@@ -21,17 +21,17 @@ import (
 )
 
 type ServerConfig struct {
-	LocalAddr         string            `json:"local_addr"`
-	MaxCommand        int               `json:"max_command"`
-	Duration          int64             `json:"execTime"`
-	MaxSendTimes      int               `json:"max_send_times"`
-	ReportDuration    int               `json:"report_duration"`
-	MotorAddrList     map[string]string `json:"motor_addr_list"`
-	MaxReconnectTimes int               `json:"max_reconnect_times"`
-	SyncTimeMotors    []string          `json:"sync_time_motors"`
-	SyncTimeGroupSize int               `json:"sync_time_group_size"`
-	SendTimeDuration  int               `json:"send_time_duration"`
-	SendGroupSize     int               `json:"send_group_size"`
+	LocalAddr         string            `json:"local_addr"`      //监听本机地址TCP链接
+	MaxCommand        int               `json:"max_command"`    //每个电机的命令队列的长度
+	Duration          int64             `json:"duration"`    //等待OK的时间 毫秒
+	MaxSendTimes      int               `json:"max_send_times"`   //每个命令最多发送次数
+	ReportDuration    int               `json:"report_duration"`   //报告连接的电机信息的时间间隔  秒
+	MotorAddrList     map[string]string `json:"motor_addr_list"`   //电机的编号与ip
+	MaxReconnectTimes int               `json:"max_reconnect_times"`   //快速重连最大次数
+	SyncTimeMotors    []string          `json:"sync_time_motors"`    //需要发送时间同步命令的电机
+	SyncTimeGroupSize int               `json:"sync_time_group_size"`    //时间同步每组的电机数
+	SendTimeDuration  int               `json:"send_time_duration"`   //错峰发送 时间段的长度 毫秒
+	SendGroupSize     int               `json:"send_group_size"`    //错峰发送 每个时间段可以发送命令的电机数
 }
 
 var configPath = "matrixConfig.json"
@@ -43,21 +43,21 @@ type MotorResult struct {
 	lock    *sync.RWMutex
 }
 type Command struct {
-	id         string
-	content    string
-	execTime   int64
-	needResend bool
+	id         string    //电机编号
+	content    string    //命令内容
+	execTime   int64   //命令的执行时间
+	needResend bool   //如果发送失败是否需要重发
 }
 type MotorClient struct {
-	command        map[string]chan *Command
+	command        map[string]chan *Command    //命令队列
 	commandLock    *sync.RWMutex
 	ctx            context.Context
 	cancel         context.CancelFunc
-	connectedMotor map[string]struct{}
+	connectedMotor map[string]struct{}   //成功连接的电机
 	motorLock      *sync.RWMutex
-	syncTime       []time.Time
-	motorPowerOn   []int64
-	startTime      time.Time
+	syncTime       []time.Time   //电机返回上电时间的时间
+	motorPowerOn   []int64    //电机上电后的毫秒数
+	startTime      time.Time   //程序启动的时刻
 }
 
 func NewMotorClient() *MotorClient {
@@ -175,6 +175,7 @@ func connectMotor(number string, addr string) {
 	motorClient.commandLock.Unlock()
 	go handleMotor(conn, number, r, command)
 }
+//若在发送命令的时候失败，则调用该方法重新连接
 func fastConnectMotor(number string, addr string) (net.Conn, error) {
 	var conn net.Conn
 	var err error
@@ -219,7 +220,7 @@ func handlerUnity(conn net.Conn) {
 				//	log.Errorf("read data error: %s", err.Error())
 				cancel()
 				return
-			} else if strings.Contains(data, "quit") {
+			} else if strings.Contains(data, "quit") {   //收到quit命令，开始关闭程序
 				motorClient.cancel()
 				return
 			} else {
@@ -233,7 +234,7 @@ func handlerUnity(conn net.Conn) {
 						content:    cmd[1],
 						needResend: true,
 					}
-					if len(cmd) > 2 {
+					if len(cmd) > 2 {    //命令有带时间参数,将时间转化成电机的时间
 						t, err := time.Parse("2006-01-02 15:04:05", cmd[2])
 						if err != nil {
 							log.Errorf("error: %s", err.Error())
@@ -269,7 +270,7 @@ func handlerUnity(conn net.Conn) {
 		}
 
 	}()
-	go func() {
+	go func() {    //报告当前成功连接的电机信息
 		defer func() {
 			if p := recover(); p != nil {
 				log.Error("panic: ", p)
@@ -301,7 +302,7 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 			log.Errorf("panic error: %v", err)
 		}
 	}()
-	defer func() {
+	defer func() {   //资源释放
 		c.Close()
 		close(command)
 		motorClient.commandLock.Lock()
@@ -348,7 +349,7 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 				timer.Reset(time.Duration(ConfigInfo.SendTimeDuration) * time.Millisecond)
 				n := time.Now().Sub(motorClient.startTime).Milliseconds()
 				t := n%totalSendDuration - motorSendDuration
-				for t > 0 && t < (int64)(ConfigInfo.SendTimeDuration) {
+				for t > 0 && t < (int64)(ConfigInfo.SendTimeDuration) {     //只能在特定的时间段向某个电机发送命令
 					time.Sleep(10 * time.Millisecond)
 					n = time.Now().Sub(motorClient.startTime).Milliseconds()
 					t = n%totalSendDuration - motorSendDuration
@@ -359,11 +360,14 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 				}
 				if sendCommand(c, m.id, cmd, result, times) != nil {
 					var err error
+					//重连
 					c, err = fastConnectMotor(id, ConfigInfo.MotorAddrList[id])
 					if err != nil {
+						//重连失败，放弃该命令以及之后的命令
 						log.Errorf("can't connect to motor %s", id)
 						cancel()
 						time.Sleep(5 * time.Second)
+						//每隔30秒重新连接一次电机
 						go connectMotor(id, ConfigInfo.MotorAddrList[id])
 					} else {
 						_ = sendCommand(c, m.id, cmd, result, times)
@@ -403,7 +407,9 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 					}
 				}
 			} else {
-				log.Infof("receive data: %s from %s", data, id)
+				if !strings.Contains(data,"FAIL") {
+					log.Infof("receive data: %s from %s", data, id)
+				}
 				s := reg.FindString(data)
 				if s != "" {
 					s := s[1 : len(s)-1]
@@ -418,6 +424,7 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 					}
 				}
 				if data == "<OK>\r" {
+					//回复OK，表示发送的命令电机收到了
 					result.lock.Lock()
 					result.success = true
 					result.lock.Unlock()
@@ -427,6 +434,7 @@ func handleMotor(c net.Conn, id string, result *MotorResult, command chan *Comma
 		}
 	}()
 	go func() {
+		//心跳，保持连接不被关闭
 		defer func() {
 			if p := recover(); p != nil {
 				log.Error("panic: ", p)
@@ -491,7 +499,9 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 		}
 	}()
 	if times > ConfigInfo.MaxSendTimes {
-		log.Infof("failed to send %s to %s, have send for %d times", cmd, id, times)
+		if !strings.Contains(cmd,"greet") {
+			log.Infof("failed to send %s to %s, have send for %d times", cmd, id, times)
+		}
 		//return errors.New("failed to send")
 		return nil
 	}
@@ -505,6 +515,7 @@ func sendCommand(conn net.Conn, id string, cmd string, result *MotorResult, time
 	for {
 		select {
 		case <-ctx.Done():
+			//超时重传
 			time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
 			return sendCommand(conn, id, cmd, result, times+1)
 		default:
